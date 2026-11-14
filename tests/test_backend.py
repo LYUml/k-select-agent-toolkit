@@ -48,3 +48,19 @@ def test_competing_process_cannot_use_desktop():
         with pytest.raises(KSelectError) as exc:
             kselect_backend.call_backend("status")
     assert exc.value.code == "busy"
+
+
+def test_restricted_mcp_environment_restores_windows_com_paths():
+    from pathlib import Path
+    from cli_anything.kselect.worker import manufacturer_environment
+    result = manufacturer_environment({"SYSTEMROOT": "C:/Windows"})
+    assert result["SYSTEMROOT"] == "C:/Windows"
+    for name in ("CommonProgramFiles", "CommonProgramFiles(x86)", "CommonProgramW6432"):
+        assert Path(result[name]).is_dir()
+
+
+def test_explicit_windows_com_path_override_is_preserved():
+    from cli_anything.kselect.worker import manufacturer_environment
+    result = manufacturer_environment({"COMMONPROGRAMFILES": "C:/custom-components"})
+    assert result["COMMONPROGRAMFILES"] == "C:/custom-components"
+    assert "CommonProgramFiles" not in result

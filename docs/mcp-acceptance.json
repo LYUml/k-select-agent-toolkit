@@ -1,0 +1,23 @@
+{
+  "ok": true,
+  "package": "wheel installed into clean environment",
+  "transport": "MCP stdio",
+  "initial_launch": "starting",
+  "foreign_working_directory": true,
+  "checks": {
+    "model": true,
+    "neck": true,
+    "module": true,
+    "border": true,
+    "airflow": true,
+    "terminal_velocity": true,
+    "throw_pattern": true
+  },
+  "selected": {
+    "airflow_cfm": 300.0,
+    "throw_ft": 14.0,
+    "pressure_in_wc": 0.11,
+    "nc": 22.0
+  },
+  "sha256": "a42370200648e6eac2a8a4cb5d325a0af5e850583fec33948cb444ee5c2d8d77"
+}

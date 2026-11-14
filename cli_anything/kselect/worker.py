@@ -26,6 +26,30 @@ def executable() -> Path:
     return path.resolve()
 
 
+def manufacturer_environment(base=None):
+    """Restore public Windows COM paths omitted by restricted MCP clients.
+
+    The MCP SDK's default inherited environment omits CommonProgramFiles. GRD's
+    registered 32-bit components then fail with error 335 / 8007007E. Read only
+    these standard paths from Windows, and preserve explicit client overrides.
+    """
+    import winreg
+    env = dict(os.environ if base is None else base)
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion",
+                        0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+        common = winreg.QueryValueEx(key, "CommonFilesDir")[0]
+        try:
+            common_x86 = winreg.QueryValueEx(key, "CommonFilesDir (x86)")[0]
+        except FileNotFoundError:
+            common_x86 = common
+    names = {name.casefold() for name in env}
+    for name, value in {"CommonProgramFiles": common, "CommonProgramFiles(x86)": common_x86,
+                        "CommonProgramW6432": common}.items():
+        if name.casefold() not in names:
+            env[name] = value
+    return env
+
+
 @contextlib.contextmanager
 def desktop_lock():
     import msvcrt
@@ -56,6 +80,13 @@ def wait_for(predicate, message: str, seconds: float = 5):
         if time.monotonic() >= deadline:
             raise KSelectError("state_timeout", message)
         time.sleep(0.1)
+
+
+def window_gone(handle):
+    # A successful action can destroy a dialog before pywinauto revalidates its
+    # wrapper. Query the OS handle directly so that success is not a stale-handle
+    # exception. Never dereference the destroyed wrapper while polling.
+    return not ctypes.windll.user32.IsWindow(handle) or not ctypes.windll.user32.IsWindowVisible(handle)
 
 
 class GRD:
@@ -94,7 +125,30 @@ class GRD:
         return None
 
     def roots(self):
-        return [w for w in self.desktop.windows(title_re=r"^GRD Selection Version .*") if self.path_matches(w)]
+        return [w for w in self.native_windows(prefix="GRD Selection Version ") if self.path_matches(w)]
+
+    def native_windows(self, pid=None, prefix=None):
+        import win32gui
+        import win32process
+        from pywinauto.controls.hwndwrapper import HwndWrapper, InvalidWindowHandle
+        handles = []
+        def collect(handle, _):
+            if prefix and not win32gui.GetWindowText(handle).startswith(prefix):
+                return True
+            if pid is None or win32process.GetWindowThreadProcessId(handle)[1] == pid:
+                handles.append(handle)
+            return True
+        win32gui.EnumWindows(collect, None)
+        windows = []
+        for handle in handles:
+            try:
+                if win32gui.IsWindow(handle) and win32gui.IsWindowVisible(handle):
+                    windows.append(HwndWrapper(handle))
+            except (InvalidWindowHandle, win32gui.error):
+                # A transient dropdown/dialog can disappear between EnumWindows
+                # and wrapper construction. Do not fail the whole snapshot.
+                continue
+        return windows
 
     def root(self):
         roots = self.roots()
@@ -105,7 +159,14 @@ class GRD:
         return roots[0]
 
     def windows(self, root):
-        return [w for w in self.desktop.windows(process=root.process_id()) if w.is_visible() and w.handle != root.handle and w.class_name() not in ("ThunderRT6Main", "tooltips_class32")]
+        return [w for w in self.native_windows(root.process_id()) if w.handle != root.handle and w.class_name() not in ("ThunderRT6Main", "tooltips_class32")]
+
+    @staticmethod
+    def dialog_details(window):
+        details = {"title": window.window_text(), "class": window.class_name()}
+        if details["class"] == "#32770":
+            details["text"] = [c.window_text()[:2000] for c in window.descendants() if c.is_visible() and c.class_name() in ("Static", "Button") and c.window_text()]
+        return details
 
     def status(self):
         roots = self.roots()
@@ -122,7 +183,7 @@ class GRD:
         state = "blocked" if dialogs or not w.is_enabled() else "ready"
         if "10.0.2" not in w.window_text():
             state = "unsupported_version"
-        return {**result, "state": state, "dialogs": [{"title": d.window_text(), "class": d.class_name()} for d in dialogs], "screen": w.window_text()}
+        return {**result, "state": state, "dialogs": [self.dialog_details(d) for d in dialogs], "screen": w.window_text()}
 
     def launch(self):
         if self.roots():
@@ -131,7 +192,7 @@ class GRD:
         if starting:
             return {"ok": True, "state": "starting", "pid": starting["pid"], "executable": str(self.exe)}
         # Do not wait for input-idle or the GUI. Clients poll status afterwards.
-        process = subprocess.Popen([str(self.exe)], cwd=str(self.exe.parent))
+        process = subprocess.Popen([str(self.exe)], cwd=str(self.exe.parent), env=manufacturer_environment())
         self.launch_record.parent.mkdir(parents=True, exist_ok=True)
         self.launch_record.write_text(json.dumps({"pid": process.pid, "time": time.time()}), encoding="utf-8")
         return {"ok": True, "state": "starting", "pid": process.pid, "executable": str(self.exe)}
@@ -181,17 +242,26 @@ class GRD:
         # Observed native grid: 25px heading and 24px rows at 96 DPI. Scale
         # relative to the discovered grid width, then verify native PDF identity.
         scale = rect.width() / 371
-        self.foreground(root)
-        grid.click_input(coords=(int(rect.width() / 2), round((38 + index * 24) * scale)), double=True)
+        x, y = int(rect.width() / 2), round((38 + index * 24) * scale)
+        # This legacy grid updates its selected row on WM_MOUSEMOVE, not on
+        # button-down. Send that event before the double-click; no pointer input
+        # or foreground ownership is needed for the observed grid control.
+        grid.send_message(0x0200, 0, (y << 16) | x)
+        time.sleep(0.15)
+        grid.double_click(coords=(x, y))
         time.sleep(0.7)
 
     def select_1400(self, root):
+        import win32gui
+        fresh_index = False
         if "[Project Screen]" in root.window_text():
             project = self.visible(root, class_name="ThunderRT6TextBox", control_id=6).window_text().strip()
             if project and project.lower() != "temp.kec":
                 raise KSelectError("project_open", "Use a separate GRD quick-selection session; a named project is open", project=project)
-            self.visible(root, title="Quick Select", class_name="ThunderRT6CommandButton").click(coords=(20, 10))
+            quick = self.visible(root, title="Quick Select", class_name="ThunderRT6CommandButton")
+            win32gui.PostMessage(win32gui.GetParent(quick.handle), 0x0111, quick.control_id(), quick.handle)
             wait_for(lambda: "[Product Index]" in root.window_text(), "Quick Select did not open Product Index")
+            fresh_index = not project
         elif "[GRD Performance]" in root.window_text():
             # Keep an already open performance screen. Final native PDF identity
             # verification rejects any model other than 1400; never infer identity
@@ -199,16 +269,38 @@ class GRD:
             return
         if "[Product Index]" not in root.window_text():
             raise KSelectError("unexpected_ui", "Start from Project Screen, Product Index or GRD Performance")
-        # The deepest product browser is three levels. Back at root is a no-op.
-        for _ in range(3):
-            self.back(root)
-        self.row(root, 3)  # Diffusers
-        self.row(root, 0)  # Drop Faced Louver Diffuser
+        current = self.visible(root, class_name="ThunderRT6TextBox", control_id=2).window_text().strip()
+        root_categories = {"Accessories", "Architectural", "Clean Room", "Diffusers", "Grilles & Registers",
+                           "Industrial Supply Grilles", "Linear Grilles", "Metric", "Security Grilles", "Stainless Steel GRDs", "Underfloor (UFAD)"}
+        diffuser_categories = {"Drop Faced Louver Diffuser", "Flush Faced Louver Face Diffuser", "Linear Slot Diffusers",
+                               "Modular Core Diffusers", "Perforated Diffuser", "Plenum Slot Diffusers", "Round Ceiling Diffusers"}
+        family = "4 Cone Louvered Face Diffuser - Steel Construction"
+        if fresh_index or current in root_categories:
+            self.row(root, 3)  # Diffusers
+            self.row(root, 0)  # Drop Faced Louver Diffuser
+        elif current in diffuser_categories:
+            self.row(root, 0)
+        elif current != family:
+            # Other families need the interactive Back controls. Keep this
+            # bounded and verify the resulting family before calculating.
+            for _ in range(3):
+                self.back(root)
+            self.row(root, 3)
+            self.row(root, 0)
         description = self.visible(root, class_name="ThunderRT6TextBox", control_id=2).window_text()
         if "4 Cone Louvered Face Diffuser - Steel Construction" != description.strip():
             raise KSelectError("unexpected_ui", "Product browser did not reach the validated 1400 family", description=description)
         self.row(root, 0)  # 1400
-        wait_for(lambda: "[GRD Performance]" in root.window_text(), "1400 performance screen did not open")
+        try:
+            wait_for(lambda: "[GRD Performance]" in root.window_text(), "1400 performance screen did not open")
+        except KSelectError:
+            self.require_unblocked(root)
+            # A missed double-click is safe to repeat once only when the same
+            # verified family page remains. Never click a different screen.
+            if "[Product Index]" not in root.window_text() or self.visible(root, class_name="ThunderRT6TextBox", control_id=2).window_text().strip() != description.strip():
+                raise
+            self.row(root, 0)
+            wait_for(lambda: "[GRD Performance]" in root.window_text(), "1400 performance screen did not open")
 
     def dialog(self, root, title):
         def find():
@@ -221,8 +313,22 @@ class GRD:
         return GRD.visible(dialog, control_id=control_id, class_name="Button")
 
     def accept_dialog(self, dialog):
-        dialog.set_focus()
-        self.button(dialog).send_message(0x00F5)  # BM_CLICK
+        import win32gui
+        button = wait_for(lambda: self.button(dialog) if self.button(dialog).is_enabled() else None,
+                          "Native dialog OK/Save button is not enabled")
+        handle = dialog.handle
+        # Post the standard IDOK/BN_CLICKED notification to the dialog itself.
+        # Unlike synchronous BM_CLICK, this neither depends on foreground focus
+        # nor waits inside a handler which may open the next modal dialog.
+        win32gui.PostMessage(handle, 0x0111, 1, button.handle)  # WM_COMMAND
+        wait_for(lambda: window_gone(handle), "Native dialog did not accept OK/Save")
+
+    @staticmethod
+    def replace_edit(edit, text):
+        edit.set_edit_text(text, pos_start=0, pos_end=-1)
+        time.sleep(0.2)
+        if edit.window_text() != text:
+            raise KSelectError("input_mismatch", "Native edit control did not retain exact replacement text")
 
     def export(self, root, path):
         from pywinauto import Desktop
@@ -244,10 +350,12 @@ class GRD:
         options = self.dialog(root, "Export Options")
         self.accept_dialog(options)
         save = self.dialog(root, "Choose export file")
-        self.visible(save, control_id=1001, class_name="Edit").set_edit_text(str(path))
+        time.sleep(0.8)  # The shell populates its default filename asynchronously.
+        self.replace_edit(self.visible(save, control_id=1001, class_name="Edit"), str(path))
         time.sleep(0.3)  # Let the common dialog commit its filename change.
+        save_handle = save.handle
         self.accept_dialog(save)
-        wait_for(lambda: not save.is_visible(), "Native Save dialog did not close", seconds=5)
+        wait_for(lambda: window_gone(save_handle), "Native Save dialog did not close", seconds=5)
         def finished():
             if not path.exists() or path.stat().st_size < 100:
                 return False
@@ -291,11 +399,12 @@ class GRD:
             root.menu_select("Performance->View Performance at Given Airflow")
             flow = self.dialog(root, "Enter Desired CFM")
             edit = self.visible(flow, control_id=4900, class_name="Edit")
-            edit.set_edit_text(str(request.effective_cfm))
+            self.replace_edit(edit, str(request.effective_cfm))
             if edit.window_text() != str(request.effective_cfm):
                 raise KSelectError("input_mismatch", "Airflow edit did not retain input")
+            flow_handle = flow.handle
             self.accept_dialog(flow)
-            wait_for(lambda: not flow.is_visible(), "Airflow dialog did not close")
+            wait_for(lambda: window_gone(flow_handle), "Airflow dialog did not close")
             self.require_unblocked(root)
             record("exporting")
             pdf = output / "performance.pdf"
@@ -306,8 +415,13 @@ class GRD:
             record("complete", completed_at=time.time(), report_sha256=result["report"]["sha256"])
             return result
         except Exception as exc:
+            (output / "diagnostic.txt").write_text(traceback.format_exc(), encoding="utf-8")
+            try:
+                journal["failure_windows"] = [self.dialog_details(w) for w in self.windows(root)]
+            except Exception:
+                pass
             error = exc.as_dict()["error"] if isinstance(exc, KSelectError) else {"code": "unexpected_ui", "message": str(exc)}
-            record("failed", error=error)
+            record("failed", failed_stage=journal["state"], error=error)
             details = {k: v for k, v in error.items() if k not in ("code", "message")}
             raise KSelectError(error["code"], error["message"], **details, output_directory=str(output), journal=str(output / "journal.json")) from exc
 
