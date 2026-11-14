@@ -3,12 +3,13 @@ from pathlib import Path
 from uuid import uuid4
 import time
 
+from . import __version__
 from .core import PerformanceRequest, verify_report, parse_report
 from .utils.kselect_backend import call_backend
 
 
 def capabilities():
-    return {"ok": True, "name": "K-Select Agent Toolkit", "version": "0.1.0", "backend": "Installed Krueger GRD 10.0.2 on Windows",
+    return {"ok": True, "name": "K-Select Agent Toolkit", "version": __version__, "backend": "Installed Krueger GRD 10.0.2 on Windows",
             "supported": {"model": ["1400"], "module_necks_in": {"12x12": [6, 8], "24x24": [6, 8, 10, 12, 14, 15]},
                           "input_airflow_units": ["cfm", "l/s"], "terminal_velocity_fpm": 50, "throw_pattern": "Horizontal",
                           "operations": ["launch", "status", "calculate performance with native PDF", "read/verify saved report"]},

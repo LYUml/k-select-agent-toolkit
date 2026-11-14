@@ -1,11 +1,12 @@
 """stdio-only MCP; SDK owns stdout, and GUI work runs in bounded subprocesses."""
 from mcp.server.mcpserver import MCPServer
 
+from . import __version__
 from .core import KSelectError, PerformanceRequest, parse_report, verify_report
 from .service import calculate_performance as calculate, capabilities
 from .utils.kselect_backend import call_backend
 
-server = MCPServer("K-Select Agent Toolkit", version="0.1.0", instructions="Call get_capabilities first. Only the listed GRD 10.0.2/1400 profile is validated. launch returns immediately; poll get_status. calculate_performance always exports and verifies a fresh native PDF. Do not claim ADPI or project compliance. Avoid concurrent desktop interaction.")
+server = MCPServer("K-Select Agent Toolkit", version=__version__, instructions="Call get_capabilities first. Only the listed GRD 10.0.2/1400 profile is validated. launch returns immediately; poll get_status. calculate_performance always exports and verifies a fresh native PDF. Do not claim ADPI or project compliance. Avoid concurrent desktop interaction.")
 
 
 def guarded(function, *args, **kwargs):
