@@ -63,18 +63,35 @@ class GRD:
         from pywinauto import Desktop
         self.desktop = Desktop(backend="win32")
         self.exe = executable()
+        self.launch_record = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "K-select-mcp" / "launch.json"
 
-    def path_matches(self, window):
+    def process_matches(self, pid):
         import win32api
+        from ctypes import wintypes
         try:
-            with contextlib.closing(win32api.OpenProcess(0x1000, False, window.process_id())) as h:
+            query = ctypes.windll.kernel32.QueryFullProcessImageNameW
+            query.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+            query.restype = wintypes.BOOL
+            with contextlib.closing(win32api.OpenProcess(0x1000, False, pid)) as h:
                 buffer = ctypes.create_unicode_buffer(32768)
                 length = ctypes.c_ulong(len(buffer))
-                if not ctypes.windll.kernel32.QueryFullProcessImageNameW(int(h), 0, buffer, ctypes.byref(length)):
+                if not query(int(h), 0, buffer, ctypes.byref(length)):
                     return False
             return Path(buffer.value).resolve() == self.exe
         except Exception:
             return False
+
+    def path_matches(self, window):
+        return self.process_matches(window.process_id())
+
+    def starting(self):
+        try:
+            record = json.loads(self.launch_record.read_text(encoding="utf-8"))
+            if 0 <= time.time() - record["time"] < 120 and self.process_matches(record["pid"]):
+                return record
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        return None
 
     def roots(self):
         return [w for w in self.desktop.windows(title_re=r"^GRD Selection Version .*") if self.path_matches(w)]
@@ -94,6 +111,9 @@ class GRD:
         roots = self.roots()
         result = {"ok": True, "executable": str(self.exe), "windows": [{"handle": w.handle, "title": w.window_text(), "pid": w.process_id()} for w in roots]}
         if not roots:
+            starting = self.starting()
+            if starting:
+                return {**result, "state": "starting", "pid": starting["pid"]}
             return {**result, "state": "not_running"}
         if len(roots) != 1:
             return {**result, "state": "multiple_instances"}
@@ -107,8 +127,13 @@ class GRD:
     def launch(self):
         if self.roots():
             return self.status()
+        starting = self.starting()
+        if starting:
+            return {"ok": True, "state": "starting", "pid": starting["pid"], "executable": str(self.exe)}
         # Do not wait for input-idle or the GUI. Clients poll status afterwards.
         process = subprocess.Popen([str(self.exe)], cwd=str(self.exe.parent))
+        self.launch_record.parent.mkdir(parents=True, exist_ok=True)
+        self.launch_record.write_text(json.dumps({"pid": process.pid, "time": time.time()}), encoding="utf-8")
         return {"ok": True, "state": "starting", "pid": process.pid, "executable": str(self.exe)}
 
     def require_unblocked(self, root):
@@ -135,9 +160,12 @@ class GRD:
 
     @staticmethod
     def foreground(root):
-        root.set_focus()
-        if ctypes.windll.user32.GetForegroundWindow() != root.handle:
-            raise KSelectError("desktop_interference", "Could not foreground GRD; keep the desktop unlocked and retry")
+        for _ in range(3):
+            root.set_focus()
+            if ctypes.windll.user32.GetForegroundWindow() == root.handle:
+                return
+            time.sleep(0.15)
+        raise KSelectError("desktop_interference", "Could not foreground GRD; keep the desktop unlocked and retry")
 
     def back(self, root):
         controls = [c for c in root.descendants(class_name="AfxOleControl42s") if c.is_visible() and not c.window_text()]
@@ -162,11 +190,13 @@ class GRD:
             project = self.visible(root, class_name="ThunderRT6TextBox", control_id=6).window_text().strip()
             if project and project.lower() != "temp.kec":
                 raise KSelectError("project_open", "Use a separate GRD quick-selection session; a named project is open", project=project)
-            self.visible(root, title="Quick Select", class_name="ThunderRT6CommandButton").click()
+            self.visible(root, title="Quick Select", class_name="ThunderRT6CommandButton").click(coords=(20, 10))
             wait_for(lambda: "[Product Index]" in root.window_text(), "Quick Select did not open Product Index")
         elif "[GRD Performance]" in root.window_text():
-            root.menu_select("Select->Choose another Model")
-            wait_for(lambda: "[Product Index]" in root.window_text(), "Product Index did not open")
+            # Keep an already open performance screen. Final native PDF identity
+            # verification rejects any model other than 1400; never infer identity
+            # from a previously saved run or from the generic window title.
+            return
         if "[Product Index]" not in root.window_text():
             raise KSelectError("unexpected_ui", "Start from Project Screen, Product Index or GRD Performance")
         # The deepest product browser is three levels. Back at root is a no-op.
@@ -190,6 +220,10 @@ class GRD:
     def button(dialog, control_id=1):
         return GRD.visible(dialog, control_id=control_id, class_name="Button")
 
+    def accept_dialog(self, dialog):
+        dialog.set_focus()
+        self.button(dialog).send_message(0x00F5)  # BM_CLICK
+
     def export(self, root, path):
         from pywinauto import Desktop
         root.menu_select("Performance->Print Performance")
@@ -206,12 +240,14 @@ class GRD:
         dest = report_uia.child_window(auto_id="16934", control_type="ComboBox").wrapper_object()
         if dest.iface_value.CurrentValue != "Disk file":
             dest.select("Disk file")
-        self.button(export).click()
+        self.accept_dialog(export)
         options = self.dialog(root, "Export Options")
-        self.button(options).click()
+        self.accept_dialog(options)
         save = self.dialog(root, "Choose export file")
         self.visible(save, control_id=1001, class_name="Edit").set_edit_text(str(path))
-        self.button(save).click()
+        time.sleep(0.3)  # Let the common dialog commit its filename change.
+        self.accept_dialog(save)
+        wait_for(lambda: not save.is_visible(), "Native Save dialog did not close", seconds=5)
         def finished():
             if not path.exists() or path.stat().st_size < 100:
                 return False
@@ -258,7 +294,7 @@ class GRD:
             edit.set_edit_text(str(request.effective_cfm))
             if edit.window_text() != str(request.effective_cfm):
                 raise KSelectError("input_mismatch", "Airflow edit did not retain input")
-            self.button(flow).click()
+            self.accept_dialog(flow)
             wait_for(lambda: not flow.is_visible(), "Airflow dialog did not close")
             self.require_unblocked(root)
             record("exporting")

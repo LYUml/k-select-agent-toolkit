@@ -104,6 +104,14 @@ def parse_report(path: str | Path) -> dict:
             raise KSelectError("unsupported_report", "Cannot uniquely read specified-airflow values")
         flow, throw, pressure, nc = rows[0].groups()
         selected = {"airflow_cfm": float(flow), "throw_ft": float(throw), "pressure_in_wc": float(pressure), "nc": None if nc == "-" else float(nc)}
+        warnings = []
+        reported_nc = selected["nc"]
+        if table["nc"][7] is None and reported_nc == 10:
+            # Observed GRD low-flow discrepancy: selected field prints 10 while
+            # the performance table prints '-'. Preserve both, assert neither
+            # an exact NC of 10 nor zero noise.
+            selected["nc"] = None
+            warnings.append("Native selected NC field reports 10 while the table reports '-'. nc is unknown; nc_reported preserves the printed number.")
         # The selected point is also column 8 in the native performance table.
         for key, val in selected.items():
             tab = table[key][7]
@@ -112,7 +120,7 @@ def parse_report(path: str | Path) -> dict:
                 raise KSelectError("report_inconsistent", "Selected result disagrees with native table", field=key, selected=val, table=tab)
         return {"path": str(path), "sha256": sha256(path), "model": model, "neck_in": neck, "module": module, "border": border, "throw_pattern": pattern, "terminal_velocity_fpm": terminal, "selected": selected,
                 "si": {"airflow_lps": float(flow) / CFM_PER_LPS, "throw_m": float(throw) * 0.3048, "pressure_pa": float(pressure) * PA_PER_IN_WC},
-                "table": table, "warnings": ["GRD labels the selected throw as 'Throw m' even in this imperial report. Unit is established from the Throw Feet table and checked against its selected column.", "NC '-' is retained as unknown/below the displayed reporting range; it is not zero.", "Manufacturer results are a design aid, not project compliance approval."]}
+                "nc_reported": reported_nc, "table": table, "warnings": warnings + ["GRD labels the selected throw as 'Throw m' even in this imperial report. Unit is established from the Throw Feet table and checked against its selected column.", "NC '-' is retained as unknown/below the displayed reporting range; it is not zero.", "Manufacturer results are a design aid, not project compliance approval."]}
     except KSelectError:
         raise
     except Exception as exc:
