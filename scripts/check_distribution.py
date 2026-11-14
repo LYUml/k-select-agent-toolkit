@@ -18,7 +18,7 @@ def main():
         assert any(name.endswith("/licenses/NOTICE") for name in names)
     with tarfile.open(sources[0]) as archive:
         names = {name.split("/", 1)[1] for name in archive.getnames() if "/" in name}
-        for name in ("requirements-lock.txt", "scripts/setup.ps1", "scripts/live_acceptance.py", "docs/validation.md", "tests/fixtures/1400-8in-300cfm.pdf"):
+        for name in ("requirements-lock.txt", "scripts/setup.ps1", "scripts/live_acceptance.py", "cli_anything/kselect/skills/SKILL.md", "tests/fixtures/1400-8in-300cfm.pdf"):
             assert name in names, f"Source archive is missing {name}"
     print("Wheel runtime, entry points, notices and source installation inputs verified.")
 

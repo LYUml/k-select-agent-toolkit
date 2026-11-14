@@ -1,6 +1,4 @@
 include README.md LICENSE NOTICE requirements-lock.txt
-recursive-include docs *.md *.json
 recursive-include licenses *
 recursive-include scripts *.py *.ps1
-recursive-include skills *.md
 recursive-include tests *.py *.md *.pdf

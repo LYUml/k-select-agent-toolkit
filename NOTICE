@@ -3,7 +3,8 @@ Copyright 2026 LYUml and contributors
 
 Includes unmodified CLI-Anything repl_skin.py from HKUDS/CLI-Anything,
 commit 34f519533bc175d2fe287ab8316b0dd99bb9cc43, Apache License 2.0.
-See licenses/CLI-Anything-LICENSE and docs/upstream-review.md.
+Source: https://github.com/HKUDS/CLI-Anything
+See licenses/CLI-Anything-LICENSE.
 
 Krueger K-Select and GRD are third-party manufacturer software. This project is
 an independent automation adapter and is not affiliated with or endorsed by
