@@ -13,3 +13,4 @@ jobs:
       - run: python -m pip check
       - run: python -m pytest -v
       - run: python -m build
+      - run: python scripts/check_distribution.py
