@@ -3,12 +3,13 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import sysconfig
 
 import pytest
 
 
 def command(*args, cwd=None, input=None):
-    executable = Path(sys.executable).parent / ("k-select.exe" if os.name == "nt" else "k-select")
+    executable = Path(sysconfig.get_path("scripts")) / ("k-select.exe" if os.name == "nt" else "k-select")
     assert executable.is_file(), "Tests require pip install -e .[dev] first"
     return subprocess.run([str(executable), *args], cwd=cwd, input=input, text=True, encoding="utf-8", capture_output=True, timeout=15)
 
